@@ -9,7 +9,7 @@ import multiprocessing
 from abc import abstractmethod
 
 
-class Pool:
+class ChipPool:
     """Pool of chips at center of table"""
 
     def __init__(self, players):
@@ -38,8 +38,9 @@ class Pool:
 class Player:
     """A basic player, drawing only once each time"""
 
-    def __init__(self, name):
+    def __init__(self, name, players=None):
         self.name = name
+        self.players = players
         self.chips = {}
         self.diamonds = 0
         self.score = 0
@@ -64,6 +65,24 @@ class Player:
     def will_draw(self):
         """Logic for whether or not to draw more"""
         raise NotImplementedError()
+
+    def calc_stealable(self):
+        """Calculate the amount in all player hands able to steal"""
+        stealable = 0
+        for player in self.players:
+            if player == self:
+                continue
+            stealable += sum([k * v for k, v in player.chips.items()])
+        return stealable
+
+    def to_be_stolen(self):
+        """Calculate how much is about to be stolen if player decides to stop drawing"""
+        stolen = 0
+        for player in self.players:
+            if player == self:
+                continue
+            stolen += sum([k * v for k, v in player.chips.items() if k in self.chips])
+        return stolen
 
     def step1(self):
         """Step 1 in player's turn"""
@@ -143,36 +162,81 @@ class InteractivePlayer(Player):
         return True
 
 
-class ThresholdPlayer(Player):
-    """Conservative AI player"""
+class RandomPlayer(Player):
+    """AI randomly drawing"""
 
-    def __init__(self, name, n=3):
-        self.n = n
-        super().__init__(name)
+    def __init__(self, name, r=0.5, **common):
+        self.r = r
+        super().__init__(name, **common)
 
     def will_draw(self):
-        """Logic for whether to draw"""
+        """Draw at random, at chance self.r"""
+        return random.random() < self.r
+
+
+class ThresholdPlayer(Player):
+    """AI based on threshold"""
+
+    def __init__(self, name, n, **common):
+        self.n = n
+        super().__init__(name, **common)
+
+    def will_draw(self):
+        """
+        Logic for whether to draw
+
+        self.n is the maximum number of chips the player wants to have,
+        i.e. draw if their number of chips is less than self.n
+        """
         return self.drawn_chips < self.n
 
 
-class OppertunisticPlayer(Player):
-    """Conservative AI player"""
+class ConservativePlayer(Player):
+    """AI only taking until satisfied (or hits drawn chips)"""
 
-    def __init__(self, name, n, m=3):
+    def __init__(self, name, satisfaction, n, **common):
         self.n = n
-        self.m = m
-        super().__init__(name)
+        self.satisfaction = satisfaction
+        super().__init__(name, **common)
 
     def will_draw(self):
-        """Logic for whether to draw"""
-        if sum([k for k, v in self.chips.items() if v > 0]) < self.n:
+        """
+        Never draw more than self.n
+        Draw if to-be-stolen < self.satisfaction
+        """
+        if self.drawn_chips < self.n:
             return True
-        return self.drawn_chips < self.m
+        return self.to_be_stolen() < self.satisfaction
+
+
+class GreedyPlayer(Player):
+    """AI based on threshold and number of stealable chips"""
+
+    def __init__(self, name, stealable, stolen, n=None, **common):
+        self.n = n
+        self.stealable = stealable
+        self.stolen = stolen
+        super().__init__(name, **common)
+
+    def will_draw(self):
+        """
+        Draw a maximum of self.n chips.
+        Draw if sum of stealable chips > self.stealable.
+        If stealable chips is less than self.stealable, draw until self.stolen
+        has been stolen.
+        """
+        if self.n and self.drawn_chips < self.n:
+            return True
+        if self.calc_stealable() > self.stealable:
+            return True
+        if self.to_be_stolen() < self.stolen:
+            return True
+        return False
 
 
 def game(players):
     """One game"""
-    pool = Pool(players)
+    pool = ChipPool(players)
     game_over = False
     winner = None
 
@@ -205,25 +269,34 @@ def experiment(n_players, N):
         [ThresholdPlayer, ("Threshold-6", 6)],
         [ThresholdPlayer, ("Threshold-7", 7)],
         [ThresholdPlayer, ("Threshold-8", 8)],
-        [OppertunisticPlayer, ("Oppertunistic-1", 1)],
-        [OppertunisticPlayer, ("Oppertunistic-2", 2)],
-        [OppertunisticPlayer, ("Oppertunistic-3", 3)],
-        [OppertunisticPlayer, ("Oppertunistic-4", 4)],
-        [OppertunisticPlayer, ("Oppertunistic-5", 5)],
-        [OppertunisticPlayer, ("Oppertunistic-6", 6)],
+        [RandomPlayer, ("Random-0.5", 0.5)],
+        [RandomPlayer, ("Random-0.6", 0.6)],
+        [RandomPlayer, ("Random-0.7", 0.7)],
+        [RandomPlayer, ("Random-0.8", 0.8)],
+        [RandomPlayer, ("Random-0.9", 0.9)],
+        [RandomPlayer, ("Random-0.95", 0.95)],
+        [GreedyPlayer, ("Greedy-1", 5, 5)],
+        [GreedyPlayer, ("Greedy-2", 10, 10, 4)],
+        [GreedyPlayer, ("Greedy-3", 15, 15, 4)],
+        [GreedyPlayer, ("Greedy-4", 20, 20, 4)],
+        [GreedyPlayer, ("Greedy-5", 30, 30, 4)],
+        [GreedyPlayer, ("Greedy-6", 40, 40, 4)],
+        [ConservativePlayer, ("Conservative-10", 10, 3)],
+        [ConservativePlayer, ("Conservative-20", 20, 3)],
+        [ConservativePlayer, ("Conservative-30", 30, 3)],
     ]
     winners = {i[1][0]: 0 for i in instantiations}
     participations = {i[1][0]: 0 for i in instantiations}
     for _ in range(N):
         weights = [random.randint(0, 10) for _ in instantiations]
-        players = [
-            c(*a)
-            for c, a in random.choices(
-                instantiations,
-                weights=weights,
-                k=n_players,
-            )
-        ]
+        players = []
+        for c, a in random.choices(
+            instantiations,
+            weights=weights,
+            k=n_players,
+        ):
+            players.append(c(*a, players=players))
+
         logging.info("Weights: %s", weights)
         logging.info("players: %s", [p.name for p in players])
         for player in players:
@@ -245,12 +318,13 @@ def experiment(n_players, N):
     for win_rate, player in win_rates:
         logging.warning("%s: %.2f%%", player, win_rate)
     logging.warning("========================\n")
+    return win_rates
 
 
 def main():
     """Main loop"""
     logging.basicConfig(format="%(message)s", level=logging.WARNING)
-    args = [(n_players, 50000) for n_players in range(2, 8)]
+    args = [(n_players, 5000) for n_players in range(2, 8)]
     with multiprocessing.Pool() as p:
         p.starmap(experiment, args)
 
